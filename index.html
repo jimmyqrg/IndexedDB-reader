@@ -203,4 +203,94 @@
             storeBox.appendChild(pre);
 
           } catch (err) {
-            storeBox.appendChild(makeEl('div', {className:'e
+            storeBox.appendChild(makeEl('div', {className:'error', innerText: `Read error: ${err && err.message ? err.message : err}`}));
+          }
+        }
+      }
+
+      // close db to release locks
+      try { db.close(); } catch(e) {}
+
+    } catch (errOpen) {
+      container.appendChild(makeEl('div', {className:'error', innerText: `Failed to open DB "${name}": ${errOpen && errOpen.message ? errOpen.message : errOpen}`}));
+    }
+
+    return container;
+  }
+
+  // sanitize filename parts
+  function sanitize(s) {
+    return String(s).replace(/[<>:"/\\|?*\x00-\x1F]/g,'_').slice(0,120);
+  }
+
+  // Main scan
+  async function scanAll() {
+    scanBtn.disabled = true;
+    clearBtn.disabled = true;
+    lastScan.innerText = 'scanning...';
+    const limit = Math.max(1, Number(limitInput.value) || 500);
+    try {
+      // modern API
+      if (indexedDB.databases) {
+        let dbList = [];
+        try {
+          dbList = await indexedDB.databases();
+        } catch (e) {
+          // some browsers require call without await? but typically throws on permission issues
+          out.appendChild(makeEl('div', {className:'error', innerText: 'indexedDB.databases() threw: ' + (e && e.message ? e.message : e)}));
+        }
+
+        if (!dbList || dbList.length === 0) {
+          logHTML('<div class="small">No databases returned by indexedDB.databases(). You may still try manual names below.</div>');
+        } else {
+          for (const dbInfo of dbList) {
+            const node = await inspectDatabase(dbInfo, limit);
+            out.appendChild(node);
+          }
+        }
+
+      } else {
+        // Fallback: ask user for names (best-effort)
+        logHTML('<div class="small">indexedDB.databases() not supported in this browser. Please supply known database names in the console: window.manualInspect(["name1","name2"])</div>');
+      }
+
+    } catch (err) {
+      out.appendChild(makeEl('div', {className:'error', innerText: 'Scan error: ' + (err && err.message ? err.message : String(err))}));
+    } finally {
+      scanBtn.disabled = false;
+      clearBtn.disabled = false;
+      lastScan.innerText = isoNow();
+    }
+  }
+
+  // Manual inspect function (for browsers that don't support indexedDB.databases())
+  window.manualInspect = async function(names, limitOverride) {
+    if (!Array.isArray(names)) {
+      console.error('manualInspect expects an array of names');
+      return;
+    }
+    const limit = Math.max(1, Number(limitOverride || limitInput.value) || 500);
+    for (const name of names) {
+      const dbInfo = {name, version: undefined};
+      const node = await inspectDatabase(dbInfo, limit);
+      out.appendChild(node);
+    }
+    lastScan.innerText = isoNow();
+  };
+
+  // Wire UI
+  scanBtn.onclick = () => {
+    clearOut();
+    scanAll();
+  };
+  clearBtn.onclick = clearOut;
+
+  // Initial quick hint output
+  out.innerHTML = `
+    <div class="small">Press <strong>Scan databases</strong> to enumerate IndexedDB databases and view contents. If this page is not on the same origin as the DBs, open the snippet in the target site's console instead.</div>
+  `;
+
+})();
+</script>
+</body>
+</html>
