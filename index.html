@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>IndexedDB Inspector — List & Dump</title>
+<style>
+  body{font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin:18px; background:#0f1724; color:#e6eef8}
+  h1{font-size:20px;margin:0 0 10px}
+  .note{color:#9fb0d8;margin:6px 0 18px;font-size:13px}
+  .controls{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+  button{background:#1f6feb;border:none;padding:6px 10px;border-radius:8px;color:white;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  input[type=number]{width:72px;padding:6px;border-radius:6px;border:1px solid #233445;background:#071124;color:#dfefff}
+  .db{background:#07122a;border:1px solid #1e3350;padding:12px;border-radius:10px;margin-bottom:12px}
+  .db h2{margin:0 0 8px;font-size:16px}
+  .store{background:#07172a;border:1px solid #12324a;padding:10px;border-radius:8px;margin:8px 0}
+  .meta{font-size:13px;color:#9fb0d8;margin-bottom:8px}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  pre{background:#031224;border-radius:6px;padding:10px;overflow:auto;max-height:360px;border:1px solid #123147;color:#cfe8ff}
+  .actions{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+  .pill{background:#072034;padding:6px 8px;border-radius:999px;border:1px solid #12334a;color:#bfe0ff;font-size:13px}
+  .small{font-size:13px;color:#9fb0d8}
+  .error{color:#ffb4b4;background:#3a1010;padding:8px;border-radius:6px}
+  details{margin-top:8px}
+  a.link{color:#9bf; text-decoration:underline}
+</style>
+</head>
+<body>
+  <h1>IndexedDB Inspector</h1>
+  <div class="note">
+    Runs on the current origin. If nothing appears, ensure you're on the same domain and the page has permission to access the site's IndexedDB.
+  </div>
+
+  <div class="controls">
+    <button id="scanBtn">Scan databases</button>
+    <label class="small">Max records per store:
+      <input id="limitInput" type="number" min="1" value="500" />
+    </label>
+    <button id="clearBtn">Clear results</button>
+    <div style="margin-left:auto" class="small">Last scan: <span id="lastScan">never</span></div>
+  </div>
+
+  <div id="out"></div>
+
+<script>
+(() => {
+  const out = document.getElementById('out');
+  const scanBtn = document.getElementById('scanBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const lastScan = document.getElementById('lastScan');
+  const limitInput = document.getElementById('limitInput');
+
+  function logHTML(html) {
+    out.insertAdjacentHTML('beforeend', html);
+  }
+
+  function clearOut() {
+    out.innerHTML = '';
+  }
+
+  function isoNow() {
+    return new Date().toLocaleString();
+  }
+
+  function makeEl(tag, props={}, children=[]) {
+    const e = document.createElement(tag);
+    Object.assign(e, props);
+    children.forEach(c => e.appendChild(c));
+    return e;
+  }
+
+  // Utility: download JSON
+  function downloadJSON(filename, obj) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // Utility: copy text
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  // Read all records from an object store (up to limit)
+  function readAllFromStore(db, storeName, limit=500) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const cursorReq = store.openCursor();
+      const results = [];
+      cursorReq.onsuccess = (ev) => {
+        const cursor = ev.target.result;
+        if (!cursor || results.length >= limit) {
+          resolve({items: results, truncated: !!cursor});
+          return;
+        }
+        results.push(cursor.value);
+        cursor.continue();
+      };
+      cursorReq.onerror = () => {
+        resolve({error: cursorReq.error ? cursorReq.error.message : 'cursor error'});
+      };
+    });
+  }
+
+  // Open DB and list stores and contents
+  async function inspectDatabase(dbInfo, limit) {
+    const name = dbInfo.name;
+    const version = dbInfo.version;
+    const container = makeEl('div', {className:'db'});
+    const title = makeEl('h2', {innerText: `DB: ${name} (v${version})`});
+    container.appendChild(title);
+    const meta = makeEl('div', {className:'meta', innerText: `Opened at ${isoNow()}`});
+    container.appendChild(meta);
+
+    try {
+      const openReq = indexedDB.open(name, version);
+      const db = await new Promise((resolve, reject) => {
+        openReq.onsuccess = e => resolve(e.target.result);
+        openReq.onerror = e => reject(e.target.error);
+        // If upgrade needed, we don't change anything; just resolve when success
+        openReq.onupgradeneeded = e => {
+          // DB schema change during open — we'll still inspect stores that exist after upgrade completes.
+        };
+      });
+
+      // list object store names
+      const stores = Array.from(db.objectStoreNames || []);
+      if (stores.length === 0) {
+        const s = makeEl('div', {className:'small', innerText: 'No object stores.'});
+        container.appendChild(s);
+      } else {
+        for (const storeName of stores) {
+          const storeBox = makeEl('div', {className:'store'});
+          const h = makeEl('div', {innerHTML: `<strong>Store:</strong> ${storeName}`});
+          storeBox.appendChild(h);
+
+          // get keyPath & autoIncrement if possible (via transaction from db)
+          try {
+            // To safely access metadata, open a versionchange transaction is not required; use transaction and get keyPath from objectStore
+            const tx = db.transaction(storeName, 'readonly');
+            const sRef = tx.objectStore(storeName);
+            const info = `keyPath: ${JSON.stringify(sRef.keyPath)}  •  autoIncrement: ${sRef.autoIncrement}`;
+            storeBox.appendChild(makeEl('div', {className:'meta', innerText: info}));
+          } catch (errMeta) {
+            storeBox.appendChild(makeEl('div', {className:'meta', innerText: 'store metadata unavailable'}));
+          }
+
+          // read contents
+          const reading = makeEl('div', {innerText: 'Reading store...'});
+          storeBox.appendChild(reading);
+          container.appendChild(storeBox);
+
+          try {
+            const {items, truncated, error} = await readAllFromStore(db, storeName, limit);
+            if (error) {
+              const errEl = makeEl('div', {className:'error', innerText: `Error reading store: ${error}`});
+              storeBox.appendChild(errEl);
+              continue;
+            }
+
+            const actions = makeEl('div', {className:'actions'});
+            const countPill = makeEl('span', {className:'pill', innerText: `Records: ${items.length}${truncated ? ' (more...)' : ''}`});
+            actions.appendChild(countPill);
+
+            const jsonObj = {db: name, version, store: storeName, records: items};
+            const pretty = JSON.stringify(jsonObj, null, 2);
+
+            const downloadBtn = makeEl('button', {innerText: 'Download JSON'});
+            downloadBtn.onclick = () => downloadJSON(`${sanitize(name)}--${sanitize(storeName)}.json`, jsonObj);
+            actions.appendChild(downloadBtn);
+
+            const copyBtn = makeEl('button', {innerText: 'Copy JSON'});
+            copyBtn.onclick = async () => {
+              const ok = await copyText(pretty);
+              copyBtn.innerText = ok ? 'Copied!' : 'Copy failed';
+              setTimeout(()=> copyBtn.innerText = 'Copy JSON', 1400);
+            };
+            actions.appendChild(copyBtn);
+
+            const viewBtn = makeEl('button', {innerText: 'Show JSON'});
+            const pre = makeEl('pre', {innerText: pretty});
+            pre.style.display = 'none';
+            viewBtn.onclick = () => {
+              pre.style.display = pre.style.display === 'none' ? 'block' : 'none';
+              viewBtn.innerText = pre.style.display === 'none' ? 'Show JSON' : 'Hide JSON';
+            };
+            actions.appendChild(viewBtn);
+
+            storeBox.appendChild(actions);
+            storeBox.appendChild(pre);
+
+          } catch (err) {
+            storeBox.appendChild(makeEl('div', {className:'e
